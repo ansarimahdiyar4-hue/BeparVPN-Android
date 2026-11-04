@@ -117,6 +117,61 @@ jobs:
           print("Patched Compose imports in", p)
           PYCODE
 
+      - name: Suppress the VPN-specific foreground-service lint false positive
+        shell: bash
+        run: |
+          set -euo pipefail
+          MANIFEST="$PROJECT_DIR/app/src/main/AndroidManifest.xml"
+          test -f "$MANIFEST" || { echo "AndroidManifest.xml not found: $MANIFEST"; exit 1; }
+          python3 - "$MANIFEST" <<'PYCODE'
+          from pathlib import Path
+          import re
+          import sys
+
+          path = Path(sys.argv[1])
+          text = path.read_text(encoding="utf-8")
+
+          # The project uses a real VpnService. Android allows an active VPN app
+          # to use systemExempted; lint currently reports a false positive because
+          # it only lists the exact-alarm permission alternatives for this type.
+          if 'android:name=".vpn.BeparVpnService"' not in text:
+              raise SystemExit("Expected BeparVpnService declaration was not found; refusing to patch another service.")
+          if 'android:foregroundServiceType="systemExempted"' not in text:
+              raise SystemExit("BeparVpnService is not declared systemExempted; refusing to apply a mismatched lint suppression.")
+
+          if 'xmlns:tools="http://schemas.android.com/tools"' not in text:
+              text = text.replace(
+                  'xmlns:android="http://schemas.android.com/apk/res/android"',
+                  'xmlns:android="http://schemas.android.com/apk/res/android" xmlns:tools="http://schemas.android.com/tools"',
+                  1,
+              )
+
+          match = re.search(r'<service\b(?=[^>]*android:name="\.vpn\.BeparVpnService")[^>]*>', text)
+          if not match:
+              raise SystemExit("Could not locate the BeparVpnService XML element.")
+          service = match.group(0)
+          if 'tools:ignore=' in service:
+              service = re.sub(
+                  r'tools:ignore="([^"]*)"',
+                  lambda m: 'tools:ignore="' + ','.join(dict.fromkeys([x for x in (m.group(1) + ',ForegroundServicePermission').split(',') if x])) + '"',
+                  service,
+                  count=1,
+              )
+          else:
+              service = service[:-1] + ' tools:ignore="ForegroundServicePermission">'
+          text = text[:match.start()] + service + text[match.end():]
+
+          # Validate the resulting manifest is well-formed and suppression is local.
+          import xml.etree.ElementTree as ET
+          root = ET.fromstring(text)
+          ns = {'android': 'http://schemas.android.com/apk/res/android', 'tools': 'http://schemas.android.com/tools'}
+          service_node = next((node for node in root.findall('.//service') if node.get('{%s}name' % ns['android']) == '.vpn.BeparVpnService'), None)
+          if service_node is None or service_node.get('{%s}ignore' % ns['tools']) is None:
+              raise SystemExit("Manifest validation failed after applying lint suppression.")
+          path.write_text(text, encoding="utf-8")
+          print("Applied narrowly-scoped ForegroundServicePermission suppression to BeparVpnService.")
+          PYCODE
+
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
