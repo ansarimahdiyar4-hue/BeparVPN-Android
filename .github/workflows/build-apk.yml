@@ -93,6 +93,30 @@ jobs:
           mkdir -p "$PROJECT_DIR/app/libs"
           cp libXray.aar "$PROJECT_DIR/app/libs/libXray.aar"
 
+      - name: Patch Kotlin Compose imports
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE="$PROJECT_DIR/app/src/main/java/com/bepar/vpn/MainActivity.kt"
+          test -f "$FILE" || { echo "MainActivity.kt not found: $FILE"; exit 1; }
+          python3 - "$FILE" <<'PYCODE'
+          from pathlib import Path
+          import sys
+          p = Path(sys.argv[1])
+          s = p.read_text(encoding="utf-8")
+          # `weight` is a RowScope/ColumnScope member; importing the internal
+          # implementation exposes an inaccessible RowColumnParentData API.
+          s = s.replace("import androidx.compose.foundation.layout.weight\n", "")
+          # safeDrawing is a separate WindowInsets extension property import.
+          if "import androidx.compose.foundation.layout.safeDrawing\n" not in s:
+              s = s.replace(
+                  "import androidx.compose.foundation.layout.WindowInsets\n",
+                  "import androidx.compose.foundation.layout.WindowInsets\nimport androidx.compose.foundation.layout.safeDrawing\n"
+              )
+          p.write_text(s, encoding="utf-8")
+          print("Patched Compose imports in", p)
+          PYCODE
+
       - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
